@@ -1,6 +1,6 @@
 # ⚡ PingSwitcher
 
-![Version](https://img.shields.io/badge/version-1.10-brightgreen)
+![Version](https://img.shields.io/badge/version-1.11-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Windows-blue)
 ![Python](https://img.shields.io/badge/python-3.8%2B-yellow)
 ![License](https://img.shields.io/badge/license-MIT-blue)

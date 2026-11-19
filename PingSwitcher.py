@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
 import threading
+import queue
 import winsound
 import keyboard
 import pydivert
@@ -13,21 +14,27 @@ import webbrowser
 import json
 import pygame
 import subprocess
+import time
+import psutil
+from PIL import Image, ImageTk
 
-# ---------- Инициализация Аудио ----------
 try:
     pygame.mixer.init()
-except Exception as e:
-    print(f"Audio init error: {e}")
+except Exception:
+    pass
 
-# ---------- Настройки (сохранение в JSON) ----------
 SETTINGS_FILE = "settings.json"
 DEFAULT_SETTINGS = {
     "hotkey": "ctrl+shift+c",
     "on_sound": "",
     "off_sound": "",
     "play_on": True,
-    "play_off": True
+    "play_off": True,
+    "teleport_mode": False,
+    "language": "en",
+    "bg_image": "",
+    "strict_hotkey": True,
+    "topmost": True
 }
 
 def load_settings():
@@ -47,7 +54,6 @@ def save_settings(settings):
     except Exception:
         pass
 
-# ---------- Темная тема окна Windows ----------
 def set_dark_title_bar(window):
     try:
         window.update()
@@ -60,14 +66,14 @@ def set_dark_title_bar(window):
     except Exception:
         pass
 
-# ---------- Локализация ----------
 TRANSLATIONS = {
     "en": {
-        "title": "PingSwitcher v1.12 by: v33z10",
+        "title": "PingSwitcher v1.13 by: v33z10",
         "start_btn": "Start",
         "stop_btn": "Stop",
+        "teleport_mode": "Teleport Mode (Beta)",
         "auto_reconnect": "Auto-reconnect after",
-        "seconds": "seconds",
+        "seconds": "sec",
         "always_on_top": "Always on top",
         "status_ready": "Ready",
         "status_lagging": "Traffic blocked...",
@@ -75,9 +81,12 @@ TRANSLATIONS = {
         "lang_label": "Language:",
         "time_left": "Time left: {}s",
         "no_limit": "No limit",
+        "idle_time": "Time left: --",
+        "traffic_label": " | ↓ {} KB/s ↑ {} KB/s",
         "tab_main": "Main",
         "tab_settings": "Settings",
         "hotkey_label": "Start Hotkey:",
+        "strict_hotkey": "Strict Hotkey (Only exact keys)",
         "btn_apply_hk": "Apply",
         "hotkey_error": "Invalid hotkey format!",
         "hotkey_success": "Hotkey updated!",
@@ -85,16 +94,22 @@ TRANSLATIONS = {
         "sound_off": "Enable OFF sound",
         "sound_on_file": "Sound on Start:",
         "sound_off_file": "Sound on Stop:",
-        "select_file": "Select Audio",
+        "select_file": "Select",
+        "reset_file": "Reset",
         "err_filter": "WinDivert Error",
         "fix_btn": "🛠 Fix Program (WinDivert)",
         "fix_title": "Fix Applied",
-        "fix_success": "WinDivert services have been stopped and cleared.\nPlease restart your PC or try starting again."
+        "fix_success": "WinDivert services have been stopped and cleared.",
+        "bg_label": "Background Image:",
+        "bg_select": "Select Image",
+        "bg_reset": "Remove",
+        "ping_label": "Ping: {} ms"
     },
     "ru": {
-        "title": "PingSwitcher v1.12 by: v33z10",
+        "title": "PingSwitcher v1.13 by: v33z10",
         "start_btn": "Запустить",
         "stop_btn": "Остановить",
+        "teleport_mode": "Режим телепортации (Beta)",
         "auto_reconnect": "Авто-переподключение через",
         "seconds": "сек",
         "always_on_top": "Поверх всех окон",
@@ -104,9 +119,12 @@ TRANSLATIONS = {
         "lang_label": "Язык:",
         "time_left": "Осталось: {}с",
         "no_limit": "Без ограничений",
+        "idle_time": "Осталось: --",
+        "traffic_label": " | ↓ {} КБ/с  ↑ {} КБ/с",
         "tab_main": "Главная",
         "tab_settings": "Настройки",
         "hotkey_label": "Горячая клавиша:",
+        "strict_hotkey": "Строгий хоткей (Только точные клавиши)",
         "btn_apply_hk": "Применить",
         "hotkey_error": "Неверный формат клавиши!",
         "hotkey_success": "Клавиша обновлена!",
@@ -114,15 +132,19 @@ TRANSLATIONS = {
         "sound_off": "Включить звук при стопе",
         "sound_on_file": "Звук запуска:",
         "sound_off_file": "Звук остановки:",
-        "select_file": "Выбрать аудио",
+        "select_file": "Выбрать",
+        "reset_file": "Сброс",
         "err_filter": "Ошибка WinDivert",
         "fix_btn": "🛠 Исправить программу",
         "fix_title": "Исправление применено",
-        "fix_success": "Службы WinDivert остановлены и очищены.\nПожалуйста, перезагрузите ПК или попробуйте запустить снова."
+        "fix_success": "Службы WinDivert остановлены и очищены.",
+        "bg_label": "Фоновое изображение:",
+        "bg_select": "Выбрать фон",
+        "bg_reset": "Убрать",
+        "ping_label": "Пинг: {} мс"
     }
 }
 
-# ---------- Проверка прав администратора ----------
 def is_admin():
     try:
         return ctypes.windll.shell32.IsUserAnAdmin()
@@ -146,12 +168,12 @@ def request_admin():
         )
         sys.exit(0)
 
-# ---------- Поток PingSwitcher ----------
 class LagSwitchBlocker(threading.Thread):
-    def __init__(self, w):
+    def __init__(self, w, teleport_mode):
         super().__init__(daemon=True)
         self.w = w
-        self.inbound_buffer = []
+        self.teleport_mode = teleport_mode
+        self.packet_buffer = []
         self._stop_event = threading.Event()
         self.active = True
 
@@ -163,34 +185,36 @@ class LagSwitchBlocker(threading.Thread):
                 except Exception:
                     break
 
-                if packet.is_outbound:
-                    # Исходящие (ваши выстрелы) уходят моментально
+                if packet.dst_port == 53535 or packet.src_port == 53535:
+                    continue
+
+                if not self.teleport_mode and packet.is_outbound:
                     self.w.send(packet)
                 else:
-                    # Входящие (урон, смерть) задерживаются в буфере
-                    self.inbound_buffer.append(packet)
-                    if len(self.inbound_buffer) > 15000:
-                        self.inbound_buffer.pop(0)
-        except Exception as e:
-            print(f"[PingSwitcher] Ошибка WinDivert: {e}")
+                    self.packet_buffer.append(packet)
+                    if len(self.packet_buffer) > 20000:
+                        self.packet_buffer.pop(0)
+        except Exception:
+            pass
         finally:
             self.active = False
-            # При остановке выплевываем весь накопленный буфер
-            if self.inbound_buffer:
-                for p in self.inbound_buffer:
+            if self.packet_buffer:
+                for p in self.packet_buffer:
                     try: self.w.send(p)
                     except: pass
-                self.inbound_buffer.clear()
+                self.packet_buffer.clear()
+            time.sleep(0.15)
             try: self.w.close()
             except: pass
 
     def stop(self):
         self._stop_event.set()
         try:
-            self.w.close()
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.sendto(b'wakeup', ('127.0.0.1', 53535))
+            s.close()
         except: pass
 
-# ---------- Класс для прокручиваемого фрейма ----------
 class ScrollableFrame(ttk.Frame):
     def __init__(self, container, *args, **kwargs):
         super().__init__(container, *args, **kwargs)
@@ -215,11 +239,10 @@ class ScrollableFrame(ttk.Frame):
     def _on_mousewheel(self, event):
         self.canvas.yview_scroll(int(-1*(event.delta/120)), "units")
 
-# ---------- GUI ----------
 class PingSwitcherApp:
     def __init__(self, root):
         self.root = root
-        self.root.geometry("480x380")
+        self.root.geometry("480x350")
         self.root.resizable(False, False)
         self.root.configure(bg="#1e1e1e")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -231,19 +254,41 @@ class PingSwitcherApp:
 
         self.settings = load_settings()
         self.current_hotkey = self.settings.get("hotkey", "ctrl+shift+c")
-        
+        try:
+            self.current_hotkey, self.hotkey_parts = self._parse_hotkey(self.current_hotkey)
+        except (TypeError, ValueError):
+            self.current_hotkey, self.hotkey_parts = self._parse_hotkey("ctrl+shift+c")
+            self.settings["hotkey"] = self.current_hotkey
+            save_settings(self.settings)
+
         self.auto_stop_timer = None
         self.countdown_timer = None
         self.time_left = 0
         self.blocker = None
         self.is_running = False
+        self.running = True
+        self.last_net = psutil.net_io_counters()
+        
+        # Глобальная клавиатурная обработка не должна обращаться к Tkinter
+        # из фонового потока. События передаются в главный поток через очередь.
+        self.pressed_keys = set()
+        self.hotkey_active = False
+        self._hotkey_lock = threading.RLock()
+        self._hotkey_queue = queue.SimpleQueue()
+        self._hotkey_hook = None
+        self._hotkey_poll_id = None
+        self.strict_hotkey_enabled = bool(self.settings.get("strict_hotkey", True))
 
-        self.lang_var = tk.StringVar(value="en")
+        self.lang_var = tk.StringVar(value=self.settings.get("language", "en"))
+        self.teleport_var = tk.BooleanVar(value=self.settings.get("teleport_mode", False))
+        self.strict_hotkey_var = tk.BooleanVar(value=self.settings.get("strict_hotkey", True))
         self.auto_reconnect_var = tk.BooleanVar(value=True)
         self.auto_seconds_var = tk.IntVar(value=10)
-        self.topmost_var = tk.BooleanVar(value=False)
+        self.topmost_var = tk.BooleanVar(value=self.settings.get("topmost", True))
         self.status_var = tk.StringVar()
         self.countdown_var = tk.StringVar()
+        self.ping_var = tk.StringVar(value="Ping: --")
+        self.traffic_var = tk.StringVar(value=" | ↓ 0.0 KB/s ↑ 0.0 KB/s")
         
         self.play_on_var = tk.BooleanVar(value=self.settings.get("play_on", True))
         self.play_off_var = tk.BooleanVar(value=self.settings.get("play_off", True))
@@ -251,21 +296,59 @@ class PingSwitcherApp:
         self._setup_styles()
         self._build_ui()
         self._update_language()
-        self.apply_hotkey(silent=True)
-        self._apply_topmost()
+        self._apply_background()
         
+        try:
+            self._hotkey_hook = keyboard.hook(self._handle_keyboard_event, suppress=False)
+        except Exception as e:
+            messagebox.showerror(
+                "Keyboard Error",
+                f"Не удалось включить глобальные горячие клавиши: {e}"
+            )
+        self._hotkey_poll_id = self.root.after(30, self._process_hotkey_queue)
+
+        self.net_thread = threading.Thread(target=self._net_loop, daemon=True)
+        self.net_thread.start()
+        
+        self._apply_topmost()
         set_dark_title_bar(self.root)
 
     def _setup_styles(self):
         style = ttk.Style()
         style.theme_use("clam")
+        
         style.configure("TNotebook", background="#1e1e1e", borderwidth=0)
         style.configure("TNotebook.Tab", background="#2d2d2d", foreground="#aaaaaa", padding=[15, 5], font=("Segoe UI", 9))
         style.map("TNotebook.Tab", background=[("selected", "#1e1e1e")], foreground=[("selected", "#ffffff")])
         style.configure("TFrame", background="#1e1e1e")
         style.configure("TScrollbar", background="#2d2d2d", troughcolor="#1e1e1e", borderwidth=0)
+        
+        style.configure('TSpinbox', 
+                        fieldbackground='#2d2d2d', 
+                        background='#3d3d3d', 
+                        foreground='white', 
+                        arrowcolor='white',
+                        insertcolor='white')
+        
+        style.map('TCombobox', fieldbackground=[('readonly', '#2d2d2d')])
+        style.map('TCombobox', selectbackground=[('readonly', '#2d2d2d')])
+        style.map('TCombobox', selectforeground=[('readonly', 'white')])
+        style.configure('TCombobox', foreground='white')
+        
+        self.root.option_add('*TCombobox*Listbox.background', '#2d2d2d')
+        self.root.option_add('*TCombobox*Listbox.foreground', 'white')
+        self.root.option_add('*TCombobox*Listbox.selectBackground', '#7cb342')
+        self.root.option_add('*TCombobox*Listbox.selectForeground', 'white')
 
     def _build_ui(self):
+        self.title_frame = tk.Frame(self.root, bg="#2d2d2d")
+        self.title_frame.pack(fill="x", side="top")
+        self.title_label = tk.Label(
+            self.title_frame, text="PingSwitcher v1.13 by: v33z10",
+            bg="#2d2d2d", fg="#cccccc", font=("Segoe UI", 10)
+        )
+        self.title_label.pack(pady=4)
+
         self.link_label = tk.Label(
             self.root, text="https://pingswitcher.gt.tc/",
             bg="#2d2d2d", fg="#4a90e2", font=("Segoe UI", 9, "underline"),
@@ -274,30 +357,15 @@ class PingSwitcherApp:
         self.link_label.pack(fill="x", side="bottom")
         self.link_label.bind("<Button-1>", lambda e: webbrowser.open("https://pingswitcher.gt.tc/"))
 
-        self.title_frame = tk.Frame(self.root, bg="#2d2d2d")
-        self.title_frame.pack(fill="x", side="top")
-        self.title_label = tk.Label(
-            self.title_frame, text="PingSwitcher v1.12 by: v33z10",
-            bg="#2d2d2d", fg="#cccccc", font=("Segoe UI", 10)
-        )
-        self.title_label.pack(pady=4)
-
         self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(fill="both", expand=True, padx=10, pady=(5, 5))
+        self.notebook.pack(fill="both", expand=True, padx=15, pady=10)
 
         # ================= Вкладка 1: Главная =================
         self.tab_main = ttk.Frame(self.notebook, style="TFrame")
         self.notebook.add(self.tab_main, text="Main")
 
-        self.status_label = tk.Label(
-            self.tab_main, textvariable=self.status_var,
-            bg="#1e1e1e", fg="#888888", font=("Segoe UI", 9)
-        )
-        self.status_label.pack(side="bottom", pady=5)
-
-        # Кнопка Старт/Стоп (Canvas)
         self.btn_canvas = tk.Canvas(self.tab_main, width=280, height=80, bg="#1e1e1e", highlightthickness=0)
-        self.btn_canvas.pack(pady=(20, 5))
+        self.btn_canvas.pack(pady=(15, 5))
         
         self.btn_rect = self._create_rounded_rect(5, 5, 275, 75, radius=20, fill="#7cb342")
         self.btn_text_top = self.btn_canvas.create_text(140, 30, text="Start", fill="white", font=("Segoe UI", 14, "bold"))
@@ -307,14 +375,20 @@ class PingSwitcherApp:
         self.btn_canvas.tag_bind(self.btn_text_top, "<Button-1>", self._on_btn_click)
         self.btn_canvas.tag_bind(self.btn_text_bot, "<Button-1>", self._on_btn_click)
 
+        self.ping_label = tk.Label(
+            self.tab_main, textvariable=self.ping_var,
+            bg="#1e1e1e", fg="#4a90e2", font=("Segoe UI", 11, "bold")
+        )
+        self.ping_label.pack(pady=5)
+
         self.countdown_label = tk.Label(
             self.tab_main, textvariable=self.countdown_var,
             bg="#1e1e1e", fg="#ff9800", font=("Segoe UI", 9, "bold")
         )
-        self.countdown_label.pack(pady=5)
+        self.countdown_label.pack(pady=2)
 
         self.frame_auto = tk.Frame(self.tab_main, bg="#1e1e1e")
-        self.frame_auto.pack(pady=10)
+        self.frame_auto.pack(pady=5)
 
         self.auto_cb = tk.Checkbutton(
             self.frame_auto, text="Auto-reconnect", variable=self.auto_reconnect_var,
@@ -323,14 +397,30 @@ class PingSwitcherApp:
         )
         self.auto_cb.pack(side="left", padx=3)
 
-        self.auto_spin = tk.Spinbox(
+        self.auto_spin = ttk.Spinbox(
             self.frame_auto, from_=3, to=120, textvariable=self.auto_seconds_var,
             width=4, font=("Segoe UI", 10), justify="center"
         )
-        self.auto_spin.pack(side="left", padx=3)
+        self.auto_spin.pack(side="left", padx=5)
 
         self.secs_label = tk.Label(self.frame_auto, text="sec", bg="#1e1e1e", fg="white", font=("Segoe UI", 10))
         self.secs_label.pack(side="left", padx=3)
+
+        # Нижняя панель со статусом и трафиком
+        self.bottom_frame = tk.Frame(self.tab_main, bg="#1e1e1e")
+        self.bottom_frame.pack(side="bottom", pady=5)
+
+        self.status_label = tk.Label(
+            self.bottom_frame, textvariable=self.status_var,
+            bg="#1e1e1e", fg="#888888", font=("Segoe UI", 9)
+        )
+        self.status_label.pack(side="left")
+
+        self.traffic_label = tk.Label(
+            self.bottom_frame, textvariable=self.traffic_var,
+            bg="#1e1e1e", fg="#aaaaaa", font=("Segoe UI", 9)
+        )
+        self.traffic_label.pack(side="left")
 
         # ================= Вкладка 2: Настройки =================
         self.tab_settings = ttk.Frame(self.notebook, style="TFrame")
@@ -339,17 +429,16 @@ class PingSwitcherApp:
         self.scroll_frame = ScrollableFrame(self.tab_settings)
         self.scroll_frame.pack(fill="both", expand=True)
         self.content_frame = self.scroll_frame.scrollable_frame
+        self.content_frame.configure(bg="#1e1e1e")
 
-        # --- Язык ---
         self.lang_frame = tk.Frame(self.content_frame, bg="#1e1e1e")
         self.lang_frame.pack(fill="x", padx=10, pady=(10, 5))
         self.lang_label = tk.Label(self.lang_frame, text="Language:", bg="#1e1e1e", fg="white", font=("Segoe UI", 10))
         self.lang_label.pack(side="left")
         self.lang_combo = ttk.Combobox(self.lang_frame, textvariable=self.lang_var, values=["en", "ru"], width=5, state="readonly")
         self.lang_combo.pack(side="right", padx=10)
-        self.lang_combo.bind("<<ComboboxSelected>>", lambda e: self._update_language())
+        self.lang_combo.bind("<<ComboboxSelected>>", self._on_lang_change)
 
-        # --- Горячая клавиша ---
         self.hk_frame = tk.Frame(self.content_frame, bg="#1e1e1e")
         self.hk_frame.pack(fill="x", padx=10, pady=5)
         
@@ -362,7 +451,22 @@ class PingSwitcherApp:
         self.hk_btn = tk.Button(self.hk_frame, text="Apply", bg="#3d3d3d", fg="white", relief="flat", command=self.apply_hotkey)
         self.hk_btn.pack(side="right")
 
-        # --- Общие настройки ---
+        self.strict_hk_cb = tk.Checkbutton(
+            self.content_frame, text="Strict Hotkey (Only exact keys)", variable=self.strict_hotkey_var,
+            bg="#1e1e1e", fg="white", selectcolor="#1e1e1e",
+            activebackground="#1e1e1e", activeforeground="white",
+            font=("Segoe UI", 10), command=self._save_strict_settings
+        )
+        self.strict_hk_cb.pack(anchor="w", padx=10, pady=5)
+
+        self.teleport_cb = tk.Checkbutton(
+            self.content_frame, text="Teleport Mode (Beta)", variable=self.teleport_var,
+            bg="#1e1e1e", fg="white", selectcolor="#1e1e1e",
+            activebackground="#1e1e1e", activeforeground="white", font=("Segoe UI", 10),
+            command=self._save_teleport_settings
+        )
+        self.teleport_cb.pack(anchor="w", padx=10, pady=5)
+
         self.topmost_cb = tk.Checkbutton(
             self.content_frame, text="Always on top", variable=self.topmost_var,
             bg="#1e1e1e", fg="white", selectcolor="#1e1e1e",
@@ -373,7 +477,6 @@ class PingSwitcherApp:
 
         tk.Frame(self.content_frame, bg="#333", height=1).pack(fill="x", padx=10, pady=5)
 
-        # --- Улучшенные настройки звука ---
         self.snd_title = tk.Label(self.content_frame, text="Sound settings:", bg="#1e1e1e", fg="white", font=("Segoe UI", 10, "bold"))
         self.snd_title.pack(anchor="w", padx=10, pady=(5, 2))
 
@@ -386,8 +489,11 @@ class PingSwitcherApp:
         self.on_file_frame.pack(fill="x", padx=20, pady=2)
         self.on_label = tk.Label(self.on_file_frame, text="Sound on Start:", bg="#1e1e1e", fg="#aaaaaa", font=("Segoe UI", 9))
         self.on_label.pack(side="left")
-        self.on_btn = tk.Button(self.on_file_frame, text="Select Audio", bg="#3d3d3d", fg="white", relief="flat", width=12, command=lambda: self._select_sound("on"))
-        self.on_btn.pack(side="right")
+        
+        self.on_reset_btn = tk.Button(self.on_file_frame, text="Reset", bg="#555555", fg="white", relief="flat", width=6, command=lambda: self._reset_sound("on"))
+        self.on_reset_btn.pack(side="right", padx=2)
+        self.on_btn = tk.Button(self.on_file_frame, text="Select", bg="#3d3d3d", fg="white", relief="flat", width=8, command=lambda: self._select_sound("on"))
+        self.on_btn.pack(side="right", padx=2)
 
         self.off_cb = tk.Checkbutton(self.content_frame, text="Enable OFF sound", variable=self.play_off_var, 
                                      bg="#1e1e1e", fg="white", selectcolor="#1e1e1e", activebackground="#1e1e1e",
@@ -398,13 +504,27 @@ class PingSwitcherApp:
         self.off_file_frame.pack(fill="x", padx=20, pady=2)
         self.off_label = tk.Label(self.off_file_frame, text="Sound on Stop:", bg="#1e1e1e", fg="#aaaaaa", font=("Segoe UI", 9))
         self.off_label.pack(side="left")
-        self.off_btn = tk.Button(self.off_file_frame, text="Select Audio", bg="#3d3d3d", fg="white", relief="flat", width=12, command=lambda: self._select_sound("off"))
-        self.off_btn.pack(side="right")
+        
+        self.off_reset_btn = tk.Button(self.off_file_frame, text="Reset", bg="#555555", fg="white", relief="flat", width=6, command=lambda: self._reset_sound("off"))
+        self.off_reset_btn.pack(side="right", padx=2)
+        self.off_btn = tk.Button(self.off_file_frame, text="Select", bg="#3d3d3d", fg="white", relief="flat", width=8, command=lambda: self._select_sound("off"))
+        self.off_btn.pack(side="right", padx=2)
         
         self.snd_path_label = tk.Label(self.content_frame, text="", bg="#1e1e1e", fg="#888888", font=("Segoe UI", 8), wraplength=380)
         self.snd_path_label.pack(pady=5)
 
-        # --- Кнопка исправления (Fix) ---
+        tk.Frame(self.content_frame, bg="#333", height=1).pack(fill="x", padx=10, pady=5)
+
+        self.bg_title = tk.Label(self.content_frame, text="Background Image:", bg="#1e1e1e", fg="white", font=("Segoe UI", 10, "bold"))
+        self.bg_title.pack(anchor="w", padx=10, pady=(5, 2))
+        
+        self.bg_frame = tk.Frame(self.content_frame, bg="#1e1e1e")
+        self.bg_frame.pack(fill="x", padx=20, pady=2)
+        self.bg_reset_btn = tk.Button(self.bg_frame, text="Remove", bg="#555555", fg="white", relief="flat", width=8, command=self._reset_bg)
+        self.bg_reset_btn.pack(side="right", padx=2)
+        self.bg_btn = tk.Button(self.bg_frame, text="Select Image", bg="#3d3d3d", fg="white", relief="flat", width=12, command=self._select_bg)
+        self.bg_btn.pack(side="right", padx=2)
+
         tk.Frame(self.content_frame, bg="#333", height=1).pack(fill="x", padx=10, pady=10)
         self.fix_btn = tk.Button(
             self.content_frame, text="🛠 Fix Program (WinDivert)",
@@ -414,7 +534,6 @@ class PingSwitcherApp:
         )
         self.fix_btn.pack(pady=10, ipadx=20, ipady=5)
 
-    # --- Вспомогательные методы ---
     def _create_rounded_rect(self, x1, y1, x2, y2, radius=25, **kwargs):
         points = [x1+radius, y1, x1+radius, y1,
                   x2-radius, y1, x2-radius, y1,
@@ -431,6 +550,177 @@ class PingSwitcherApp:
     def _on_btn_click(self, event):
         self.toggle_lag()
 
+    @staticmethod
+    def _normalize_key_name(name):
+        """Приводит варианты названий одной клавиши к общему имени."""
+        key = " ".join(str(name).strip().lower().split())
+        aliases = {
+            "left ctrl": "ctrl",
+            "right ctrl": "ctrl",
+            "control": "ctrl",
+            "left shift": "shift",
+            "right shift": "shift",
+            "left alt": "alt",
+            "right alt": "alt",
+            "left windows": "windows",
+            "right windows": "windows",
+            "win": "windows",
+            "escape": "esc",
+            "return": "enter",
+            "spacebar": "space",
+        }
+        return aliases.get(key, key)
+
+    def _parse_hotkey(self, hotkey):
+        """Проверяет и нормализует одно сочетание, например ctrl+shift+c."""
+        if not isinstance(hotkey, str):
+            raise ValueError("Hotkey must be text")
+
+        parts = [self._normalize_key_name(part) for part in hotkey.split("+")]
+        if not parts or any(not part for part in parts):
+            raise ValueError("Empty key in hotkey")
+        if len(parts) != len(set(parts)):
+            raise ValueError("Duplicate key in hotkey")
+        if any("," in part for part in parts):
+            raise ValueError("Only one key combination is supported")
+
+        normalized = "+".join(parts)
+        try:
+            parsed = keyboard.parse_hotkey(normalized)
+            if not parsed or len(parsed) != 1:
+                raise ValueError("Invalid hotkey")
+        except Exception as exc:
+            raise ValueError(str(exc)) from exc
+
+        return normalized, set(parts)
+
+    def _handle_keyboard_event(self, event):
+        """Вызывается библиотекой keyboard в фоновом потоке."""
+        try:
+            key = self._normalize_key_name(event.name)
+            if not key:
+                return
+
+            with self._hotkey_lock:
+                if event.event_type == "down":
+                    self.pressed_keys.add(key)
+
+                    if not self.hotkey_active and self.hotkey_parts.issubset(self.pressed_keys):
+                        # Строгий режим требует, чтобы были нажаты только
+                        # клавиши из заданного сочетания.
+                        exact_match = self.pressed_keys == self.hotkey_parts
+                        if not self.strict_hotkey_enabled or exact_match:
+                            self.hotkey_active = True
+                            self._hotkey_queue.put(True)
+
+                elif event.event_type == "up":
+                    self.pressed_keys.discard(key)
+                    # Разрешаем следующее срабатывание после отпускания
+                    # хотя бы одной клавиши из текущего сочетания.
+                    if not self.hotkey_parts.issubset(self.pressed_keys):
+                        self.hotkey_active = False
+        except Exception:
+            # Исключения из глобального hook не должны ломать приложение.
+            pass
+
+    def _process_hotkey_queue(self):
+        """Выполняет переключение только в главном потоке Tkinter."""
+        try:
+            while True:
+                self._hotkey_queue.get_nowait()
+                if self.running:
+                    self.toggle_lag()
+        except queue.Empty:
+            pass
+        except Exception:
+            pass
+
+        if self.running:
+            self._hotkey_poll_id = self.root.after(30, self._process_hotkey_queue)
+
+    def _net_loop(self):
+        while self.running:
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(1.0)
+                start = time.time()
+                s.connect(("8.8.8.8", 53))
+                end = time.time()
+                s.close()
+                ping = int((end - start) * 1000)
+                self.root.after(0, lambda p=ping: self.ping_var.set(TRANSLATIONS[self.lang_var.get()]["ping_label"].format(p)))
+            except Exception:
+                self.root.after(0, lambda: self.ping_var.set(TRANSLATIONS[self.lang_var.get()]["ping_label"].format("Timeout")))
+            
+            try:
+                current_net = psutil.net_io_counters()
+                down = (current_net.bytes_recv - self.last_net.bytes_recv) / 1024
+                up = (current_net.bytes_sent - self.last_net.bytes_sent) / 1024
+                self.last_net = current_net
+                self.root.after(0, lambda d=down, u=up: self.traffic_var.set(TRANSLATIONS[self.lang_var.get()]["traffic_label"].format(f"{d:.1f}", f"{u:.1f}")))
+            except Exception:
+                pass
+                
+            time.sleep(2)
+
+    def _on_lang_change(self, event=None):
+        self.settings["language"] = self.lang_var.get()
+        save_settings(self.settings)
+        self._update_language()
+
+    def _save_teleport_settings(self):
+        self.settings["teleport_mode"] = self.teleport_var.get()
+        save_settings(self.settings)
+
+    def _save_strict_settings(self):
+        self.strict_hotkey_enabled = bool(self.strict_hotkey_var.get())
+        self.settings["strict_hotkey"] = self.strict_hotkey_enabled
+        save_settings(self.settings)
+
+    def _select_bg(self):
+        file_path = filedialog.askopenfilename(
+            title="Select Image", 
+            filetypes=[("Image Files", "*.png *.jpg *.jpeg *.bmp")]
+        )
+        if file_path:
+            self.settings["bg_image"] = file_path
+            save_settings(self.settings)
+            self._apply_background()
+
+    def _reset_bg(self):
+        self.settings["bg_image"] = ""
+        save_settings(self.settings)
+        self._apply_background()
+
+    def _apply_background(self):
+        path = self.settings.get("bg_image", "")
+        
+        for widget in self.tab_main.winfo_children():
+            if isinstance(widget, tk.Label) and getattr(widget, 'is_bg', False):
+                widget.destroy()
+        for widget in self.tab_settings.winfo_children():
+            if isinstance(widget, tk.Label) and getattr(widget, 'is_bg', False):
+                widget.destroy()
+
+        if path and os.path.exists(path):
+            try:
+                img = Image.open(path)
+                img_main = img.resize((450, 320), Image.Resampling.LANCZOS)
+                self.bg_photo_main = ImageTk.PhotoImage(img_main)
+                self.bg_label_main = tk.Label(self.tab_main, image=self.bg_photo_main, bg="#1e1e1e")
+                self.bg_label_main.is_bg = True
+                self.bg_label_main.place(x=0, y=0, relwidth=1, relheight=1)
+                self.bg_label_main.lower()
+                
+                img_sett = img.resize((450, 320), Image.Resampling.LANCZOS)
+                self.bg_photo_sett = ImageTk.PhotoImage(img_sett)
+                self.bg_label_sett = tk.Label(self.tab_settings, image=self.bg_photo_sett, bg="#1e1e1e")
+                self.bg_label_sett.is_bg = True
+                self.bg_label_sett.place(x=0, y=0, relwidth=1, relheight=1)
+                self.bg_label_sett.lower()
+            except Exception:
+                pass
+
     def fix_program(self):
         t = TRANSLATIONS[self.lang_var.get()]
         try:
@@ -439,10 +729,8 @@ class PingSwitcherApp:
             startupinfo.wShowWindow = subprocess.SW_HIDE
             
             cmds = [
-                "sc stop WinDivert",
-                "sc delete WinDivert",
-                "sc stop windivert64",
-                "sc delete windivert64"
+                "sc stop WinDivert", "sc delete WinDivert",
+                "sc stop windivert64", "sc delete windivert64"
             ]
             for cmd in cmds:
                 subprocess.run(cmd, shell=True, startupinfo=startupinfo, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -466,6 +754,11 @@ class PingSwitcherApp:
             save_settings(self.settings)
             self._update_sound_label()
 
+    def _reset_sound(self, sound_type):
+        self.settings[f"{sound_type}_sound"] = ""
+        save_settings(self.settings)
+        self._update_sound_label()
+
     def _update_sound_label(self):
         on_path = self.settings.get("on_sound", "")
         off_path = self.settings.get("off_sound", "")
@@ -476,37 +769,37 @@ class PingSwitcherApp:
         self.snd_path_label.config(text=text)
 
     def apply_hotkey(self, silent=False):
-        new_hotkey = self.hk_entry.get().strip().lower()
-        if not new_hotkey: return
-            
+        raw_hotkey = self.hk_entry.get().strip()
         try:
-            keyboard.remove_hotkey(self.current_hotkey)
-        except: pass
+            new_hotkey, new_parts = self._parse_hotkey(raw_hotkey)
+        except (TypeError, ValueError):
+            if not silent:
+                t = TRANSLATIONS[self.lang_var.get()]
+                messagebox.showerror("Hotkey", t["hotkey_error"])
+            return False
 
-        try:
-            keyboard.add_hotkey(new_hotkey, lambda: None)
-            keyboard.remove_hotkey(new_hotkey)
-            
+        # Меняем сочетание только после успешной проверки. Состояние нажатых
+        # клавиш сбрасывается, чтобы старое сочетание не блокировало новое.
+        with self._hotkey_lock:
             self.current_hotkey = new_hotkey
-            self.settings["hotkey"] = new_hotkey
-            save_settings(self.settings)
-            
-            keyboard.add_hotkey(self.current_hotkey, self._toggle_from_hotkey)
-            self._update_language()
-            
-            if not silent:
-                messagebox.showinfo("Success", TRANSLATIONS[self.lang_var.get()]["hotkey_success"])
-        except Exception:
-            if not silent:
-                messagebox.showerror("Error", TRANSLATIONS[self.lang_var.get()]["hotkey_error"])
-            self.hk_entry.delete(0, tk.END)
-            self.hk_entry.insert(0, self.current_hotkey)
+            self.hotkey_parts = new_parts
+            self.pressed_keys.clear()
+            self.hotkey_active = False
+
+        self.settings["hotkey"] = new_hotkey
+        save_settings(self.settings)
+        self._update_language()
+
+        if not silent:
+            messagebox.showinfo("Success", TRANSLATIONS[self.lang_var.get()]["hotkey_success"])
+        return True
 
     def _update_language(self):
         lang = self.lang_var.get()
         t = TRANSLATIONS[lang]
 
         self.root.title(t["title"])
+        self.title_label.config(text=t["title"])
         
         hk_text = self.current_hotkey.upper().replace("+", " + ")
         if self.is_running:
@@ -521,6 +814,8 @@ class PingSwitcherApp:
         self.auto_cb.config(text=t["auto_reconnect"])
         self.secs_label.config(text=t["seconds"])
         self.topmost_cb.config(text=t["always_on_top"])
+        self.strict_hk_cb.config(text=t["strict_hotkey"])
+        self.teleport_cb.config(text=t["teleport_mode"])
         
         self.notebook.tab(0, text=t["tab_main"])
         self.notebook.tab(1, text=t["tab_settings"])
@@ -535,21 +830,34 @@ class PingSwitcherApp:
         self.off_label.config(text=t["sound_off_file"])
         self.on_btn.config(text=t["select_file"])
         self.off_btn.config(text=t["select_file"])
+        self.on_reset_btn.config(text=t["reset_file"])
+        self.off_reset_btn.config(text=t["reset_file"])
+        
+        self.bg_title.config(text=t["bg_label"])
+        self.bg_btn.config(text=t["bg_select"])
+        self.bg_reset_btn.config(text=t["bg_reset"])
+        
         self.fix_btn.config(text=t["fix_btn"])
         self._update_sound_label()
-
-        if self.is_running and self.countdown_timer and self.time_left > 0:
+        
+        if "Ping" in self.ping_var.get() or "Пинг" in self.ping_var.get():
+            self.ping_var.set(t["ping_label"].format("--"))
+            
+        # Обновляем текст трафика, если он уже есть
+        if self.traffic_var.get().startswith(" |"):
+            pass # Не трогаем, пока не придут новые данные
+            
+        if not self.is_running:
+            self.countdown_var.set(t["idle_time"])
+        elif self.countdown_timer and self.time_left > 0:
             self.countdown_var.set(t["time_left"].format(self.time_left))
-        elif not self.is_running and not self.auto_reconnect_var.get():
+        elif not self.auto_reconnect_var.get():
             self.countdown_var.set(t["no_limit"])
-        else:
-            self.countdown_var.set("")
 
     def _apply_topmost(self):
         self.root.attributes("-topmost", self.topmost_var.get())
-
-    def _toggle_from_hotkey(self):
-        self.root.after(0, self.toggle_lag)
+        self.settings["topmost"] = self.topmost_var.get()
+        save_settings(self.settings)
 
     def _play_sound(self, sound_type):
         play_var = self.play_on_var if sound_type == "on" else self.play_off_var
@@ -561,8 +869,8 @@ class PingSwitcherApp:
                 pygame.mixer.music.load(path)
                 pygame.mixer.music.play()
                 return
-            except Exception as e:
-                print(f"Audio error: {e}")
+            except Exception:
+                pass
                 
         try:
             winsound.MessageBeep(winsound.MB_ICONASTERISK if sound_type == "on" else winsound.MB_ICONHAND)
@@ -596,7 +904,7 @@ class PingSwitcherApp:
             return
 
         self.is_running = True
-        self.blocker = LagSwitchBlocker(w)
+        self.blocker = LagSwitchBlocker(w, self.teleport_var.get())
         self.blocker.start()
         
         self._play_sound("on")
@@ -653,14 +961,26 @@ class PingSwitcherApp:
         self.btn_canvas.itemconfig(self.btn_text_top, text=t["start_btn"])
         self.btn_canvas.itemconfig(self.btn_rect, fill="#7cb342")
         
-        self.countdown_var.set("")
+        self.countdown_var.set(t["idle_time"])
         self._play_sound("off")
 
     def on_close(self):
-        try:
-            keyboard.remove_hotkey(self.current_hotkey)
-        except:
-            pass
+        self.running = False
+
+        if self._hotkey_poll_id is not None:
+            try:
+                self.root.after_cancel(self._hotkey_poll_id)
+            except Exception:
+                pass
+            self._hotkey_poll_id = None
+
+        if self._hotkey_hook is not None:
+            try:
+                keyboard.unhook(self._hotkey_hook)
+            except Exception:
+                pass
+            self._hotkey_hook = None
+
         if self.blocker:
             self.blocker.stop()
         self.root.destroy()

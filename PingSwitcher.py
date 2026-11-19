@@ -11,7 +11,6 @@ import os
 import webbrowser
 import json
 
-# ---------- Настройки (сохранение в JSON) ----------
 SETTINGS_FILE = "settings.json"
 DEFAULT_SETTINGS = {
     "hotkey": "ctrl+shift+c",
@@ -34,8 +33,7 @@ def save_settings(settings):
             json.dump(settings, f, indent=4)
     except Exception:
         pass
-
-# ---------- Локализация ----------
+
 TRANSLATIONS = {
     "en": {
         "title": "PingSwitcher v1.11 by: v33z10",
@@ -86,8 +84,7 @@ TRANSLATIONS = {
         "hotkey_success": "Клавиша обновлена!"
     }
 }
-
-# ---------- Проверка прав администратора ----------
+
 def is_admin():
     try:
         return ctypes.windll.shell32.IsUserAnAdmin()
@@ -110,8 +107,7 @@ def request_admin():
             None, "runas", executable, f'"{os.path.abspath(sys.argv[0])}"', None, 0
         )
         sys.exit(0)
-
-# ---------- Поток PingSwitcher ----------
+
 class LagSwitchBlocker(threading.Thread):
     def __init__(self):
         super().__init__(daemon=True)
@@ -172,8 +168,7 @@ class LagSwitchBlocker(threading.Thread):
     def terminate(self):
         self._stop_event.set()
         self.wakeup()
-
-# ---------- GUI ----------
+
 class PingSwitcherApp:
     def __init__(self, root):
         self.root = root
@@ -220,8 +215,7 @@ class PingSwitcherApp:
         style.map("TNotebook.Tab", background=[("selected", "#1e1e1e")], foreground=[("selected", "#ffffff")])
         style.configure("TFrame", background="#1e1e1e")
 
-    def _build_ui(self):
-        # Нижняя кликабельная ссылка
+    def _build_ui(self):
         self.link_label = tk.Label(
             self.root, text="https://pingswitcher.gt.tc/",
             bg="#2d2d2d", fg="#4a90e2", font=("Segoe UI", 9, "underline"),
@@ -229,8 +223,7 @@ class PingSwitcherApp:
         )
         self.link_label.pack(fill="x", side="bottom")
         self.link_label.bind("<Button-1>", lambda e: webbrowser.open("https://pingswitcher.gt.tc/"))
-
-        # Верхняя панель заголовка
+
         self.title_frame = tk.Frame(self.root, bg="#2d2d2d")
         self.title_frame.pack(fill="x", side="top")
         self.title_label = tk.Label(
@@ -238,23 +231,19 @@ class PingSwitcherApp:
             bg="#2d2d2d", fg="#cccccc", font=("Segoe UI", 10)
         )
         self.title_label.pack(pady=4)
-
-        # --- ВКЛАДКИ ---
+
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(5, 5))
-
-        # ================= Вкладка 1: Главная =================
+
         self.tab_main = ttk.Frame(self.notebook, style="TFrame")
         self.notebook.add(self.tab_main, text="Main")
-
-        # СТАТУС (жестко прибит к низу вкладки с отступом 15px)
+
         self.status_label = tk.Label(
             self.tab_main, textvariable=self.status_var,
             bg="#1e1e1e", fg="#888888", font=("Segoe UI", 9)
         )
         self.status_label.pack(side="bottom", pady=5)
-
-        # Большая кнопка
+
         self.toggle_btn = tk.Button(
             self.tab_main, text="Connected",
             bg="#7cb342", fg="white", font=("Segoe UI", 12, "bold"),
@@ -263,15 +252,13 @@ class PingSwitcherApp:
             command=self.toggle_lag
         )
         self.toggle_btn.pack(pady=(15, 5), side="top")
-
-        # Обратный отсчет
+
         self.countdown_label = tk.Label(
             self.tab_main, textvariable=self.countdown_var,
             bg="#1e1e1e", fg="#ff9800", font=("Segoe UI", 9, "bold")
         )
         self.countdown_label.pack(pady=2, side="top")
-
-        # Флажок Auto-reconnect
+
         self.frame_auto = tk.Frame(self.tab_main, bg="#1e1e1e")
         self.frame_auto.pack(pady=10, side="top")
 
@@ -291,16 +278,13 @@ class PingSwitcherApp:
 
         self.secs_label = tk.Label(self.frame_auto, text="sec", bg="#1e1e1e", fg="white", font=("Segoe UI", 10))
         self.secs_label.pack(side="left")
-
-        # ================= Вкладка 2: Настройки =================
+
         self.tab_settings = ttk.Frame(self.notebook, style="TFrame")
         self.notebook.add(self.tab_settings, text="Settings")
-
-        # Контейнер для общих настроек
+
         self.general_frame = tk.Frame(self.tab_settings, bg="#1e1e1e")
         self.general_frame.pack(fill="x", padx=20, pady=(10, 5))
-
-        # Язык
+
         self.lang_frame_settings = tk.Frame(self.general_frame, bg="#1e1e1e")
         self.lang_frame_settings.pack(fill="x", pady=2)
         
@@ -310,8 +294,7 @@ class PingSwitcherApp:
         self.lang_combo = ttk.Combobox(self.lang_frame_settings, textvariable=self.lang_var, values=["en", "ru"], width=4, state="readonly")
         self.lang_combo.pack(side="right")
         self.lang_combo.bind("<<ComboboxSelected>>", lambda e: self._update_language())
-
-        # Always on top
+
         self.topmost_cb = tk.Checkbutton(
             self.general_frame, text="Always on top", variable=self.topmost_var,
             bg="#1e1e1e", fg="white", selectcolor="#1e1e1e",
@@ -319,8 +302,7 @@ class PingSwitcherApp:
             font=("Segoe UI", 10), command=self._apply_topmost
         )
         self.topmost_cb.pack(anchor="w", pady=2)
-
-        # Sound
+
         self.sound_cb = tk.Checkbutton(
             self.general_frame, text="Sound", variable=self.sound_var,
             bg="#1e1e1e", fg="white", selectcolor="#1e1e1e",
@@ -328,11 +310,9 @@ class PingSwitcherApp:
             font=("Segoe UI", 10)
         )
         self.sound_cb.pack(anchor="w", pady=2)
-
-        # Разделитель
+
         tk.Frame(self.tab_settings, bg="#333", height=1).pack(fill="x", padx=20, pady=5)
-
-        # Горячая клавиша
+
         self.hk_frame = tk.Frame(self.tab_settings, bg="#1e1e1e")
         self.hk_frame.pack(pady=5, fill="x", padx=20)
         
@@ -346,11 +326,9 @@ class PingSwitcherApp:
         self.hk_btn = tk.Button(self.hk_frame, text="Apply", bg="#3d3d3d", fg="white", 
                                 relief="flat", command=self.apply_hotkey)
         self.hk_btn.pack(side="left")
-
-        # Разделитель
+
         tk.Frame(self.tab_settings, bg="#333", height=1).pack(fill="x", padx=20, pady=5)
-
-        # Звук
+
         self.snd_label = tk.Label(self.tab_settings, text="Custom Sound (WAV):", bg="#1e1e1e", fg="white", font=("Segoe UI", 10))
         self.snd_label.pack(pady=(5, 5))
 
@@ -367,8 +345,7 @@ class PingSwitcherApp:
 
         self.snd_path_label = tk.Label(self.tab_settings, text=self._get_sound_name(), bg="#1e1e1e", fg="#888888", font=("Segoe UI", 8))
         self.snd_path_label.pack(pady=5)
-
-    # --- Логика настроек ---
+
     def _get_sound_name(self):
         path = self.settings.get("custom_sound", "")
         if path and os.path.exists(path):
@@ -435,12 +412,10 @@ class PingSwitcherApp:
         self.secs_label.config(text=t["seconds"])
         self.topmost_cb.config(text=t["always_on_top"])
         self.sound_cb.config(text=t["sound"])
-        
-        # Вкладки
+        
         self.notebook.tab(0, text=t["tab_main"])
         self.notebook.tab(1, text=t["tab_settings"])
-        
-        # Настройки
+        
         self.lang_label.config(text=t["lang_label"])
         self.hk_label.config(text=t["hotkey_label"])
         self.hk_btn.config(text=t["btn_apply_hk"])
